@@ -24,8 +24,8 @@ include Makefile.tools.mk
 SHELL := /usr/bin/env bash
 
 # Defaults
-TARGETOS ?= $(shell go env GOOS)
-TARGETARCH ?= $(shell go env GOARCH)
+TARGETOS ?= $(shell uname | tr '[:upper:]' '[:lower:]')
+TOKENIZER_ARCH ?= $(shell uname -m)
 PROJECT_NAME ?= llm-d-inference-sim
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(PROJECT_NAME)
@@ -36,6 +36,12 @@ ZMQ_IMAGE_NAME ?= zmq-listener
 ZMQ_IMAGE_TAG ?= latest
 NAMESPACE ?= default
 ZMQ_IMG ?= $(IMAGE_REGISTRY)/$(ZMQ_IMAGE_NAME):$(ZMQ_IMAGE_TAG)
+
+ifeq ($(TOKENIZER_ARCH),x86_64)
+TARGETARCH = amd64
+else
+TARGETARCH = $(TOKENIZER_ARCH)
+endif
 
 CONTAINER_TOOL := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
 BUILDER := $(shell command -v buildah >/dev/null 2>&1 && echo buildah || echo $(CONTAINER_TOOL))
