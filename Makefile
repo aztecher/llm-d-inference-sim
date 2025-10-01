@@ -17,22 +17,18 @@
 SHELL := /usr/bin/env bash
 
 # Defaults
-TARGETOS ?= $(shell go env GOOS)
-TARGETARCH ?= $(shell go env GOARCH)
+TARGETOS ?= $(shell uname | tr '[:upper:]' '[:lower:]')
+TOKENIZER_ARCH ?= $(shell uname -m)
 PROJECT_NAME ?= llm-d-inference-sim
 IMAGE_REGISTRY ?= ghcr.io/llm-d
 IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(PROJECT_NAME)
 SIM_TAG ?= dev
 IMG = $(IMAGE_TAG_BASE):$(SIM_TAG)
 
-ifeq ($(TARGETOS),darwin)
-ifeq ($(TARGETARCH),amd64)
-TOKENIZER_ARCH = x86_64
+ifeq ($(TOKENIZER_ARCH),x86_64)
+TARGETARCH = amd64
 else
-TOKENIZER_ARCH = $(TARGETARCH)
-endif
-else
-TOKENIZER_ARCH = $(TARGETARCH)
+TARGETARCH = $(TOKENIZER_ARCH)
 endif
 
 CONTAINER_TOOL := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
