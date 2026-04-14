@@ -20,6 +20,9 @@ require_non_empty MODEL_NAME
 require_non_empty VLLM_SIMULATOR_IMAGE
 require_non_empty UDS_TOKENIZER_IMAGE
 
+readonly PROM_NODE_PORT=30909
+readonly GRAFANA_NODE_PORT=30300
+
 export CLUSTER_NAME
 export HOST_PORT
 export MODEL_NAME
@@ -61,15 +64,59 @@ done
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
     echo "Cluster '${CLUSTER_NAME}' already exists, re-using"
 else
-    kind create cluster --name "${CLUSTER_NAME}" --config - << EOF
+    kind create cluster --name "${CLUSTER_NAME}" --image kindest/node:v1.35.0 --config - << EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+featureGates:
+  DynamicResourceAllocation: true
+  DRAConsumableCapacity: true
+  DRAPartitionableDevices: true
+  DRAPrioritizedList: true
+  DRAResourceClaimDeviceStatus: true
+  DRADeviceTaints: true
+  DRADeviceBindingConditions: true
+containerdConfigPatches:
+# Enable CDI as described in
+# https://tags.cncf.io/container-device-interface#containerd-configuration
+- |-
+  [plugins."io.containerd.grpc.v1.cri"]
+    enable_cdi = true
 nodes:
 - role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        runtime-config: "resource.k8s.io/v1beta1=true"
+    scheduler:
+        extraArgs:
+          v: "1"
+    controllerManager:
+        extraArgs:
+          v: "1"
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        v: "5"
   extraPortMappings:
-  - containerPort: ${HOST_PORT}  
+  - containerPort: ${HOST_PORT}
     hostPort: ${HOST_PORT}
     protocol: TCP
+  - containerPort: ${PROM_NODE_PORT}
+    hostPort: ${PROM_NODE_PORT}
+    protocol: TCP
+  - containerPort: ${GRAFANA_NODE_PORT}
+    hostPort: ${GRAFANA_NODE_PORT}
+    protocol: TCP
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        v: "5"
 EOF
 fi
 
