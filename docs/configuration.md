@@ -152,10 +152,10 @@ In addition, as we are using klog, the following parameters are available:
 - `vmodule`: comma-separated list of pattern=N settings for file-filtered logging
 
 # Environment variables
-- `POD_NAME`: the simulator pod name. If defined, the response will contain the HTTP header `x-inference-pod` with this value, and the HTTP header `x-inference-port` with the port that the request was received on 
+- `POD_NAME`: the simulator pod name. If defined, the response will contain the HTTP header `x-inference-pod` with this value, and the HTTP header `x-inference-port` with the port that the request was received on
 - `POD_NAMESPACE`: the simulator pod namespace. If defined, the response will contain the HTTP header `x-inference-namespace` with this value
 - `POD_IP`: the simulator pod IP address. Used in kv-events topic name.
-Example of definition in yaml: 
+Example of definition in yaml:
   ```yaml
   env:
     - name: POD_IP
@@ -163,3 +163,40 @@ Example of definition in yaml:
         fieldRef:
           fieldPath: status.podIP
   ```
+
+## GPU Resource Tracking
+The simulator can estimate GPU resource consumption (active thread percentage and memory usage) based on environment variables that define GPU resource limits. When these variables are set, the simulator will calculate and report resource consumption metrics via Prometheus.
+
+### GPU Environment Variables
+For each GPU device, you can define resource limits using the following environment variable pattern:
+- `GPU_DEVICE_<N>_ACTIVE_THREAD_PERCENTAGE`: The percentage of GPU threads that can be actively used (0-100). Example: `GPU_DEVICE_0_ACTIVE_THREAD_PERCENTAGE=10`
+- `GPU_DEVICE_<N>_MEMORY_LIMIT`: The memory limit for the GPU device. Supports units: B, KB/KiB, MB/MiB, GB/GiB, TB/TiB. Example: `GPU_DEVICE_0_MEMORY_LIMIT=12Gi`
+
+Where `<N>` is the GPU device ID (0, 1, 2, etc.).
+
+### Example Configuration
+```yaml
+env:
+  - name: GPU_DEVICE_0_ACTIVE_THREAD_PERCENTAGE
+    value: "10"
+  - name: GPU_DEVICE_0_MEMORY_LIMIT
+    value: "12Gi"
+  - name: GPU_DEVICE_1_ACTIVE_THREAD_PERCENTAGE
+    value: "15"
+  - name: GPU_DEVICE_1_MEMORY_LIMIT
+    value: "16Gi"
+```
+
+### Resource Estimation
+When GPU resource limits are configured, the simulator estimates resource consumption based on:
+- Number of prompt tokens (input)
+- Number of generation tokens (output)
+- Number of cached prompt tokens (from KV cache)
+- Number of concurrent running requests
+- Model being used
+
+The estimated metrics are exposed via Prometheus:
+- `vllm:gpu_active_thread_percentage`: Estimated GPU active thread percentage (0-100)
+- `vllm:gpu_memory_usage_bytes`: Estimated GPU memory usage in bytes
+
+These metrics are labeled with `model_name` and `device_id` for multi-GPU tracking.

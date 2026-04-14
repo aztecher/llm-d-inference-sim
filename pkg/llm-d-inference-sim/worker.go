@@ -72,6 +72,21 @@ func (s *VllmSimulator) processRequest(reqCtx requestContext) {
 
 	respCtx.setWG(&wg)
 
+	// Calculate and log resource consumption
+	if s.Context.resourceCalculator != nil {
+		consumptions := s.Context.calculateResourceConsumption(
+			respCtx.UsageData().PromptTokens,
+			respCtx.UsageData().CompletionTokens,
+			respCtx.NumberCachedPromptTokens(),
+			req.GetModel(),
+		)
+
+		// Send resource consumption for each GPU to metrics channel
+		for _, consumption := range consumptions {
+			common.WriteToChannel(s.Context.metrics.gpuResourceChan, consumption, s.Context.logger)
+		}
+	}
+
 	s.sendResponse(reqCtx, respCtx)
 
 	wg.Wait()

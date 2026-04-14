@@ -28,3 +28,5 @@ Currently supported are the following metrics:
 | vllm:cache_config_info | Information of the LLMEngine CacheConfig |
 | vllm:prefix_cache_hits | Prefix cache hits, in terms of number of cached tokens |
 | vllm:prefix_cache_queries | Prefix cache queries, in terms of number of queried tokens |
+| vllm:gpu_active_thread_percentage | GPU active thread percentage (0-100) for the current request |
+| vllm:gpu_memory_usage_bytes | GPU memory usage in bytes for the current request |

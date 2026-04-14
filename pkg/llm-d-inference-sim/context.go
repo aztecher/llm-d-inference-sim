@@ -64,6 +64,12 @@ type SimContext struct {
 	latencyCalculator LatencyCalculator
 	// Tokenizer used for request tokenization and in /tokenize
 	Tokenizer tokenizer.Tokenizer
+	// resourceCalculator estimates GPU resource consumption
+	resourceCalculator ResourceCalculator
+	// currentKVCacheUsage tracks the current KV cache utilization (0-1)
+	currentKVCacheUsage float64
+	// kvCacheUsageMux protects currentKVCacheUsage
+	kvCacheUsageMux sync.RWMutex
 }
 
 func (s *SimContext) initialize(ctx context.Context) error {
@@ -78,6 +84,17 @@ func (s *SimContext) initialize(ctx context.Context) error {
 		s.latencyCalculator = newPerTokenCalculator(s.Config, s.Random)
 	}
 
+	// Initialize resource calculator
+	resourceCalc, err := NewResourceCalculator(s.Config)
+	if err != nil {
+		return fmt.Errorf("failed to create resource calculator: %w", err)
+	}
+	s.resourceCalculator = resourceCalc
+	if s.resourceCalculator != nil {
+		s.logger.V(logging.INFO).Info("GPU resource tracking enabled",
+			"devices", len(s.resourceCalculator.GetGPULimits()))
+	}
+
 	for _, lora := range s.Config.LoraModules {
 		s.loraAdaptors.Store(lora.Name, "")
 	}
@@ -88,7 +105,7 @@ func (s *SimContext) initialize(ctx context.Context) error {
 	}
 
 	// initialize prometheus metrics
-	err := s.createAndRegisterPrometheus(ctx)
+	err = s.createAndRegisterPrometheus(ctx)
 	if err != nil {
 		return err
 	}
@@ -176,12 +193,47 @@ func (s *SimContext) getDisplayedModelName(reqModel string) string {
 
 func (s *SimContext) simulateTTFT(respCtx ResponseContext) {
 	startPrefill := time.Now()
+
+	// Get current thread utilization and cap from resource calculator
+	threadUtilization := 0.0
+	threadUtilizationCap := 0.0
+	if s.resourceCalculator != nil {
+		// Calculate resource consumption to get current utilization
+		consumptions := s.calculateResourceConsumption(
+			respCtx.UsageData().PromptTokens,
+			respCtx.UsageData().CompletionTokens,
+			respCtx.NumberCachedPromptTokens(),
+			s.Config.Model,
+		)
+
+		// Use average thread utilization across all GPUs
+		if len(consumptions) > 0 {
+			totalThreadUtil := 0.0
+			for _, c := range consumptions {
+				totalThreadUtil += c.ActiveThreadPercentage
+			}
+			threadUtilization = totalThreadUtil / float64(len(consumptions))
+		}
+
+		// Get the GPU limit/cap (use average across all GPUs)
+		gpuLimits := s.resourceCalculator.GetGPULimits()
+		if len(gpuLimits) > 0 {
+			totalCap := 0.0
+			for _, limit := range gpuLimits {
+				totalCap += limit.ActiveThreadPercentage
+			}
+			threadUtilizationCap = totalCap / float64(len(gpuLimits))
+		}
+	}
+
 	// time to first token delay
 	params := TTFTParams{
-		PromptTokens:       respCtx.UsageData().PromptTokens,
-		CachedPromptTokens: respCtx.NumberCachedPromptTokens(),
-		DoRemotePrefill:    respCtx.doRemotePrefill(),
-		RunningReqs:        s.metrics.nRunningReqs,
+		PromptTokens:         respCtx.UsageData().PromptTokens,
+		CachedPromptTokens:   respCtx.NumberCachedPromptTokens(),
+		DoRemotePrefill:      respCtx.doRemotePrefill(),
+		RunningReqs:          s.metrics.nRunningReqs,
+		ThreadUtilization:    threadUtilization,
+		ThreadUtilizationCap: threadUtilizationCap,
 	}
 	ttft := s.latencyCalculator.GetTimeToFirstToken(&params)
 	time.Sleep(ttft)
@@ -191,12 +243,98 @@ func (s *SimContext) simulateTTFT(respCtx ResponseContext) {
 }
 
 func (s *SimContext) simulateInterTokenLatency() {
+	// Get current thread utilization and cap from resource calculator
+	threadUtilization := 0.0
+	threadUtilizationCap := 0.0
+	if s.resourceCalculator != nil {
+		// For inter-token latency, we need to estimate based on current state
+		// Use a simplified calculation with minimal tokens
+		consumptions := s.calculateResourceConsumption(1, 1, 0, s.Config.Model)
+
+		// Use average thread utilization across all GPUs
+		if len(consumptions) > 0 {
+			totalThreadUtil := 0.0
+			for _, c := range consumptions {
+				totalThreadUtil += c.ActiveThreadPercentage
+			}
+			threadUtilization = totalThreadUtil / float64(len(consumptions))
+		}
+
+		// Get the GPU limit/cap (use average across all GPUs)
+		gpuLimits := s.resourceCalculator.GetGPULimits()
+		if len(gpuLimits) > 0 {
+			totalCap := 0.0
+			for _, limit := range gpuLimits {
+				totalCap += limit.ActiveThreadPercentage
+			}
+			threadUtilizationCap = totalCap / float64(len(gpuLimits))
+		}
+	}
+
 	perTokenLatency := s.latencyCalculator.GetInterTokenLatency(&InterTokenParams{
-		RunningReqs: s.metrics.nRunningReqs})
+		RunningReqs:          s.metrics.nRunningReqs,
+		ThreadUtilization:    threadUtilization,
+		ThreadUtilizationCap: threadUtilizationCap,
+	})
 	time.Sleep(perTokenLatency)
 
 	// report tpot in seconds
 	common.WriteToChannel(s.metrics.tpotChan, perTokenLatency.Seconds(), s.logger)
+}
+
+// calculateResourceConsumption estimates GPU resource consumption for a request
+func (s *SimContext) calculateResourceConsumption(promptTokens, generationTokens, cachedPromptTokens int, modelName string) []ResourceConsumption {
+	if s.resourceCalculator == nil {
+		return []ResourceConsumption{}
+	}
+
+	// Get current KV cache usage
+	s.kvCacheUsageMux.RLock()
+	kvCacheUsage := s.currentKVCacheUsage
+	s.kvCacheUsageMux.RUnlock()
+
+	// Calculate KV cache size in tokens
+	// KVCacheSize is in blocks, need to convert to tokens
+	kvCacheSizeTokens := 0
+	if s.Config.EnableKVCache && s.Config.KVCacheSize > 0 {
+		// Each block contains TokenBlockSize tokens
+		kvCacheSizeTokens = s.Config.KVCacheSize * s.Config.TokenBlockSize
+	}
+
+	params := &ResourceParams{
+		PromptTokens:           promptTokens,
+		GenerationTokens:       generationTokens,
+		CachedPromptTokens:     cachedPromptTokens,
+		RunningReqs:            s.metrics.nRunningReqs,
+		ModelName:              modelName,
+		KVCacheUsagePercentage: kvCacheUsage,
+		KVCacheSizeTokens:      kvCacheSizeTokens,
+	}
+
+	consumptions := s.resourceCalculator.CalculateResourceConsumption(params)
+
+	// Log resource consumption for each GPU
+	for _, consumption := range consumptions {
+		s.logger.V(logging.DEBUG).Info("Estimated resource consumption",
+			"model", modelName,
+			"promptTokens", promptTokens,
+			"generationTokens", generationTokens,
+			"cachedTokens", cachedPromptTokens,
+			"kvCacheUsage", fmt.Sprintf("%.2f%%", kvCacheUsage*100),
+			"kvCacheSizeTokens", kvCacheSizeTokens,
+			"deviceID", consumption.DeviceID,
+			"threadPercentage", fmt.Sprintf("%.2f%%", consumption.ActiveThreadPercentage),
+			"memoryMB", consumption.MemoryUsageBytes/(1024*1024))
+	}
+
+	return consumptions
+}
+
+// updateKVCacheUsage updates the current KV cache usage percentage
+func (s *SimContext) updateKVCacheUsage(usage float64) {
+	s.kvCacheUsageMux.Lock()
+	s.currentKVCacheUsage = usage
+	s.kvCacheUsageMux.Unlock()
 }
 
 // CreateModelsResponse creates and returns ModelResponse for the current state, returned array of models contains the base model + LoRA adapters if exist

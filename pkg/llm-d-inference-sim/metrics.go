@@ -56,6 +56,8 @@ const (
 	CacheConfigName                  = "vllm:cache_config_info"
 	PrefixCacheHitsMetricName        = "vllm:prefix_cache_hits"
 	PrefixCacheQueriesMetricName     = "vllm:prefix_cache_queries"
+	GPUThreadUtilizationMetricName   = "vllm:gpu_active_thread_percentage"
+	GPUMemoryUsageMetricName         = "vllm:gpu_memory_usage_bytes"
 )
 
 const (
@@ -155,6 +157,12 @@ type metricsData struct {
 	prefixCacheQueries *prometheus.CounterVec
 	// prefixCacheStatsChan is a channel to update prefix cache hit/query counters
 	prefixCacheStatsChan common.Channel[kvcache.PrefixCacheStats]
+	// gpuResourceChan is a channel to update GPU resource consumption metrics
+	gpuResourceChan common.Channel[ResourceConsumption]
+	// gpuThreadUtilization is prometheus gauge for GPU active thread percentage
+	gpuThreadUtilization *prometheus.GaugeVec
+	// gpuMemoryUsage is prometheus gauge for GPU memory usage in bytes
+	gpuMemoryUsage *prometheus.GaugeVec
 
 	generatedFakeMetrics []generatedFakeMetrics
 }
@@ -444,6 +452,41 @@ func (s *SimContext) createAndRegisterPrometheus(ctx context.Context) error {
 	}
 	go s.prefixCacheStatsUpdater(ctx)
 
+	// Register GPU resource metrics if resource calculator is enabled
+	if s.resourceCalculator != nil {
+		s.metrics.gpuThreadUtilization = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: "",
+				Name:      GPUThreadUtilizationMetricName,
+				Help:      "GPU active thread percentage (0-100) for the current request.",
+			},
+			[]string{vllmapi.PromLabelModelName, "device_id"},
+		)
+		if err := s.metrics.registry.Register(s.metrics.gpuThreadUtilization); err != nil {
+			s.logger.Error(err, "prometheus gpu_active_thread_percentage gauge register failed")
+			return err
+		}
+
+		s.metrics.gpuMemoryUsage = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: "",
+				Name:      GPUMemoryUsageMetricName,
+				Help:      "GPU memory usage in bytes for the current request.",
+			},
+			[]string{vllmapi.PromLabelModelName, "device_id"},
+		)
+		if err := s.metrics.registry.Register(s.metrics.gpuMemoryUsage); err != nil {
+			s.logger.Error(err, "prometheus gpu_memory_usage_bytes gauge register failed")
+			return err
+		}
+
+		s.metrics.gpuResourceChan = common.Channel[ResourceConsumption]{
+			Channel: make(chan ResourceConsumption, maxNumberOfRequests),
+			Name:    "metrics.gpuResourceChan",
+		}
+		go s.gpuResourceUpdater(ctx)
+	}
+
 	s.metrics.requestPromptTokens = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: "",
@@ -650,6 +693,8 @@ func (s *SimContext) reportKVCacheUsage(value float64) {
 		s.metrics.kvCacheUsagePercentage.WithLabelValues(
 			s.getDisplayedModelName(s.Config.Model)).Set(value)
 	}
+	// Update the current KV cache usage for resource calculation
+	s.updateKVCacheUsage(value)
 }
 
 // waitingRequestsUpdater updates the waiting requests metric by listening on the relevant channel
@@ -882,6 +927,34 @@ func (s *SimContext) recordRequestUpdater(ctx context.Context) {
 				event.finishReason,
 			)
 		}
+	}
+}
+
+// gpuResourceUpdater updates GPU resource consumption metrics by listening on the relevant channel
+func (s *SimContext) gpuResourceUpdater(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case consumption := <-s.metrics.gpuResourceChan.Channel:
+			s.reportGPUResourceConsumption(consumption)
+		}
+	}
+}
+
+// reportGPUResourceConsumption updates GPU resource consumption metrics
+func (s *SimContext) reportGPUResourceConsumption(consumption ResourceConsumption) {
+	if s.Config.FakeMetrics != nil {
+		return
+	}
+	modelName := s.getDisplayedModelName(s.Config.Model)
+	deviceID := strconv.Itoa(consumption.DeviceID)
+
+	if s.metrics.gpuThreadUtilization != nil {
+		s.metrics.gpuThreadUtilization.WithLabelValues(modelName, deviceID).Set(consumption.ActiveThreadPercentage)
+	}
+	if s.metrics.gpuMemoryUsage != nil {
+		s.metrics.gpuMemoryUsage.WithLabelValues(modelName, deviceID).Set(float64(consumption.MemoryUsageBytes))
 	}
 }
 
