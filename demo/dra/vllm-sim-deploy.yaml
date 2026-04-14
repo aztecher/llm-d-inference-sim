@@ -1,0 +1,137 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: vllm-sim-with-dra-claim
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: vgpu.example.com
+        capacity:
+          requests:
+            memory: "20Gi"
+            compute: "40"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-sim-with-dra
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      deploy-type: vllm-sim-with-dra
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vllm-sim
+        deploy-type: vllm-sim-with-dra
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - args:
+        # Model Configuration
+        - --model=meta-llama/Llama-3.1-8B-Instruct
+        - --port=8000
+        - --max-model-len=4096           # 4K context window
+        - --max-num-seqs=10              # Max 10 concurrent requests
+        
+        # Latency Configuration (realistic for 8B model)
+        - --latency-calculator=per-token
+        - --prefill-overhead=20ms
+        - --prefill-time-per-token=5ms
+        - --prefill-time-std-dev=1ms
+        - --inter-token-latency=10ms
+        - --time-factor-under-load=1.8   # 80% slowdown at max load
+
+        # KV Cache Simulation
+        - --enable-kvcache=true
+        - --kv-cache-size=64
+        - --block-size=8
+        - --global-cache-hit-threshold=0.8
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        image: ghcr.io/sunya-ch/llm-d-inference-sim:v0.8.2-dirty
+        imagePullPolicy: IfNotPresent
+        name: vllm-sim
+        resources:
+          claims:
+          - name: vgpu
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp/tokenizer
+          name: uds-socket
+      dnsPolicy: ClusterFirst
+      initContainers:
+      - env:
+        - name: LOG_LEVEL
+          value: DEBUG
+        - name: PROBE_PORT
+          value: "8082"
+        - name: HF_TOKEN
+        image: ghcr.io/llm-d/llm-d-uds-tokenizer:v0.6.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8082
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: uds-tokenizer
+        ports:
+        - containerPort: 8082
+          name: health
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8082
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources: {}
+        restartPolicy: Always
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp/tokenizer
+          name: uds-socket
+      volumes:
+      - emptyDir: {}
+        name: uds-socket
+      resourceClaims:
+       - name: vgpu
+         resourceClaimName: vllm-sim-with-dra-claim

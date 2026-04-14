@@ -1,0 +1,36 @@
+load:
+  type: trace_replay
+  trace:
+    file: ./trace-replay/AzureLMMInferenceTrace_multimodal.csv
+    format: AzurePublicDataset
+  stages:
+  - rate: 1
+    duration: 30
+api: 
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: meta-llama/Llama-3.1-8B-Instruct
+  base_url: http://localhost:30080
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: gpt2
+data:
+  type: random
+  trace:
+    file: ./trace-replay/AzureLMMInferenceTrace_multimodal.csv
+    format: AzurePublicDataset
+metrics:
+  type: prometheus
+  prometheus:
+    url: http://localhost:30909
+    scrape_interval: 15
+report:
+  request_lifecycle:
+    summary: true
+    per_stage: true
+    per_request: false
+  prometheus:
+    summary: true
+    per_stage: false
