@@ -58,6 +58,8 @@ const (
 	PrefixCacheQueriesMetricName     = "vllm:prefix_cache_queries"
 	GPUThreadUtilizationMetricName   = "vllm:gpu_active_thread_percentage"
 	GPUMemoryUsageMetricName         = "vllm:gpu_memory_usage_bytes"
+	GPUComputeAllocationMetricName   = "vllm:gpu_compute_allocation_percentage"
+	GPUMemoryAllocationMetricName    = "vllm:gpu_memory_allocation_bytes"
 )
 
 const (
@@ -163,6 +165,10 @@ type metricsData struct {
 	gpuThreadUtilization *prometheus.GaugeVec
 	// gpuMemoryUsage is prometheus gauge for GPU memory usage in bytes
 	gpuMemoryUsage *prometheus.GaugeVec
+	// gpuComputeAllocation is prometheus gauge for GPU compute allocation limit (0-100)
+	gpuComputeAllocation *prometheus.GaugeVec
+	// gpuMemoryAllocation is prometheus gauge for GPU memory allocation limit in bytes
+	gpuMemoryAllocation *prometheus.GaugeVec
 
 	generatedFakeMetrics []generatedFakeMetrics
 }
@@ -480,6 +486,32 @@ func (s *SimContext) createAndRegisterPrometheus(ctx context.Context) error {
 			return err
 		}
 
+		s.metrics.gpuComputeAllocation = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: "",
+				Name:      GPUComputeAllocationMetricName,
+				Help:      "GPU compute allocation limit (0-100) for the device.",
+			},
+			[]string{vllmapi.PromLabelModelName, "device_id"},
+		)
+		if err := s.metrics.registry.Register(s.metrics.gpuComputeAllocation); err != nil {
+			s.logger.Error(err, "prometheus gpu_compute_allocation_percentage gauge register failed")
+			return err
+		}
+
+		s.metrics.gpuMemoryAllocation = prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: "",
+				Name:      GPUMemoryAllocationMetricName,
+				Help:      "GPU memory allocation limit in bytes for the device.",
+			},
+			[]string{vllmapi.PromLabelModelName, "device_id"},
+		)
+		if err := s.metrics.registry.Register(s.metrics.gpuMemoryAllocation); err != nil {
+			s.logger.Error(err, "prometheus gpu_memory_allocation_bytes gauge register failed")
+			return err
+		}
+
 		s.metrics.gpuResourceChan = common.Channel[ResourceConsumption]{
 			Channel: make(chan ResourceConsumption, maxNumberOfRequests),
 			Name:    "metrics.gpuResourceChan",
@@ -626,6 +658,20 @@ func (s *SimContext) setInitialPrometheusMetrics(cacheConfig *prometheus.GaugeVe
 			strconv.Itoa(s.Config.MaxLoras),
 			"",
 			"").Set(float64(time.Now().Unix()))
+
+		// Initialize GPU allocation limit metrics if resource calculator is available
+		if s.resourceCalculator != nil {
+			gpuLimits := s.resourceCalculator.GetGPULimits()
+			for _, limit := range gpuLimits {
+				deviceID := strconv.Itoa(limit.DeviceID)
+				if s.metrics.gpuComputeAllocation != nil {
+					s.metrics.gpuComputeAllocation.WithLabelValues(modelName, deviceID).Set(limit.ActiveThreadPercentage)
+				}
+				if s.metrics.gpuMemoryAllocation != nil {
+					s.metrics.gpuMemoryAllocation.WithLabelValues(modelName, deviceID).Set(float64(limit.MemoryLimitBytes))
+				}
+			}
+		}
 	}
 }
 

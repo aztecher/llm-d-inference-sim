@@ -30,3 +30,5 @@ Currently supported are the following metrics:
 | vllm:prefix_cache_queries | Prefix cache queries, in terms of number of queried tokens |
 | vllm:gpu_active_thread_percentage | GPU active thread percentage (0-100) for the current request |
 | vllm:gpu_memory_usage_bytes | GPU memory usage in bytes for the current request |
+| vllm:gpu_compute_allocation_percentage | GPU compute allocation limit (0-100) for the device |
+| vllm:gpu_memory_allocation_bytes | GPU memory allocation limit in bytes for the device |
