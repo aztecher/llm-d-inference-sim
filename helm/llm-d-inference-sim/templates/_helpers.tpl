@@ -50,4 +50,17 @@ app.kubernetes.io/name: {{ include "llm-d-inference-sim.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-
+{{/*
+Merges .Values.resources with .Values.dra.claims for unified container-level resource allocation.
+*/}}
+{{- define "llm-d-inference-sim.podResources" -}}
+{{- $res := .Values.resources | default dict -}}
+{{- if .Values.dra.enabled -}}
+  {{- $claims := list -}}
+  {{- range .Values.dra.claims -}}
+    {{- $claims = append $claims (dict "name" .name) -}}
+  {{- end -}}
+  {{- $_ := set $res "claims" $claims -}}
+{{- end -}}
+{{- toYaml $res -}}
+{{- end -}}

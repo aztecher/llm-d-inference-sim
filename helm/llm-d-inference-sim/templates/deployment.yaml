@@ -83,6 +83,10 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
@@ -95,10 +99,8 @@ spec:
             httpGet:
               path: /ready
               port: http
-          {{- with .Values.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "llm-d-inference-sim.podResources" . | nindent 12 }}
           volumeMounts:
             - name: config
               mountPath: /config
@@ -111,6 +113,13 @@ spec:
         # Shared volume for Unix Domain Socket communication between the simulator and UDS tokenizer
         - name: uds-socket
           emptyDir: {}
+      {{- with .Values.dra.enabled }}
+      resourceClaims:
+        {{- range $.Values.dra.claims }}
+        - name: {{ .name }}
+          resourceClaimName: {{ include "llm-d-inference-sim.fullname" $ }}-{{ .name }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

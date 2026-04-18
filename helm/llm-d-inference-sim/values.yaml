@@ -126,3 +126,23 @@ config:
   interTokenLatency: 50 
   kvCacheTransferLatency: 50
   seed: 100100100
+  # Latency Configuration
+  latencyCalculator: "per-token"
+  prefillOverhead: "20ms"
+  prefillTimePerToken: "5ms"
+  prefillTimeStdDev: "1ms"
+  timeFactorUnderLoad: 1.8
+  # KV Cache Simulation
+  enableKvcache: true
+  kvCacheSize: 64
+  blockSize: 8
+  globalCacheHitThreshold: 0.8
+
+dra:
+  enabled: false
+  claims:
+    - name: vgpu
+      deviceClassName: vgpu.example.com
+      requests:
+        memory: "20Gi"
+        compute: "40"

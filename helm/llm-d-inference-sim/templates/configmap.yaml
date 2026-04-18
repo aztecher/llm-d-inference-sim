@@ -21,3 +21,14 @@ data:
     inter-token-latency: {{ .Values.config.interTokenLatency }}
     kv-cache-transfer-latency: {{ .Values.config.kvCacheTransferLatency }}
     seed: {{ .Values.config.seed }}
+    # Latency Configuration (realistic for 8B model)
+    latency-calculator: {{ .Values.config.latencyCalculator }}
+    prefill-overhead: {{ .Values.config.prefillOverhead }}
+    prefill-time-per-token: {{ .Values.config.prefillTimePerToken }}
+    prefill-time-std-dev: {{ .Values.config.prefillTimeStdDev }}
+    time-factor-under-load: {{ .Values.config.timeFactorUnderLoad }}
+    # KV Cache Simulation
+    enable-kvcache: {{ .Values.config.enableKvcache }}
+    kv-cache-size: {{ .Values.config.kvCacheSize }}
+    block-size: {{ .Values.config.blockSize }}
+    global-cache-hit-threshold: {{ .Values.config.globalCacheHitThreshold }}
