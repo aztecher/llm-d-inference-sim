@@ -1,6 +1,6 @@
 # llm-d Demo Helm Chart
 
-This Helm chart (`llm-d-inference-sim-demo`) deploys demo scenarios for `llm-d-inference-sim`.
+This Helm chart (`llm-d-inference-sim-demo`) deploys demo scenarios.
 Two presets are available, selected via `preset` in `values.yaml`:
 
 | Preset | Description |
@@ -40,7 +40,7 @@ Follow the [pd-disaggregation/README.md](../pd-disaggregation/README.md) for the
 ### Deploy the DRA demo (default)
 
 ```sh
-helm upgrade --install llm-d-inference-sim-demo ./demo/helm \
+helm upgrade --install llm-d-inference-sim-demo . \
   --namespace default \
   --create-namespace
 ```
@@ -49,17 +49,25 @@ This deploys:
 - `ResourceClaim/vllm-sim-with-dra-claim` — allocates a virtual GPU
 - `Deployment/llm-d-inference-sim-demo` — simulator pod with the UDS tokenizer sidecar
 
-Verify:
+When deploying to a Linux environment, please configure the image as follows:
+
 ```sh
-kubectl get pods,resourceclaims
+helm upgrade --install llm-d-inference-sim-demo . \
+  --namespace default \
+  --create-namespace \
+  --set dra.image.repository=ghcr.io/aztecher/llm-d-inference-sim \
+  --set dra.image.tag=dev
 ```
+
+This deployment is the same as [../dra/vllm-sim-deploy.yaml](../dra/vllm-sim-deploy.yaml) but managed by helm.
+
 
 ### Deploy the PD-Disaggregation demo
 
 Pick a scenario (1, 2, or 3 — see table below) and install:
 
 ```sh
-helm upgrade --install llm-d-inference-sim-demo ./demo/helm \
+helm upgrade --install llm-d-inference-sim-demo . \
   --namespace default \
   --create-namespace \
   --set preset=pd-disaggregation \
@@ -68,16 +76,14 @@ helm upgrade --install llm-d-inference-sim-demo ./demo/helm \
 
 #### Scenarios
 
-| Scenario key | Deployments | Replicas |
+| Scenario key | Deployments | Replicas (default) |
 |---|---|---|
 | **`llama-only`** | `vllm-llama3-8b-instruct-prefill` + `vllm-llama3-8b-instruct-decode` | 2 prefill + 8 decode |
 | **`granite-only`** | `vllm-granite-2b-prefill` + `vllm-granite-2b-decode` | 4 prefill + 24 decode |
 | **`mixed`** | All four deployments above | Llama: 1+4 / Granite: 2+12 |
 
-Verify:
-```sh
-kubectl get pods,resourceclaims
-```
+
+This deployments are the same as [../pd-disaggregation](../pd-disaggregation) but managed by helm.
 
 ---
 
@@ -97,6 +103,7 @@ Override any value with `--set key=value` or a custom values file.
 | Key | Default | Description |
 |---|---|---|
 | `udsTokenizer.image` | `ghcr.io/llm-d/llm-d-uds-tokenizer:v0.6.0` | Tokenizer sidecar image |
+| `udsTokenizer.imagePullPolicy` | `IfNotPresent` | Image pull policy |
 | `udsTokenizer.logLevel` | `"DEBUG"` | Log verbosity |
 | `udsTokenizer.probePort` | `8082` | Health probe port |
 
@@ -106,12 +113,13 @@ Override any value with `--set key=value` or a custom values file.
 |---|---|---|
 | `dra.image.repository` | `ghcr.io/sunya-ch/llm-d-inference-sim` | Simulator image |
 | `dra.image.tag` | `"v0.8.2-dirty"` | Image tag |
+| `dra.image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `dra.model` | `meta-llama/Llama-3.1-8B-Instruct` | Model name |
 | `dra.port` | `8000` | Simulator HTTP port |
 | `dra.maxModelLen` | `4096` | Max context window |
 | `dra.maxNumSeqs` | `10` | Max concurrent sequences |
 | `dra.latency.*` | see values.yaml | Latency simulation parameters |
-| `dra.kvCache.enabled` | `true` | Enable KV-cache simulation |
+| `dra.kvCache.*` | see values.yaml | KV-cache simulation parameters |
 | `dra.hfToken` | `""` | Hugging Face token (optional) |
 | `dra.resourceClaim.name` | `vllm-sim-with-dra-claim` | ResourceClaim name |
 | `dra.resourceClaim.deviceClassName` | `vgpu.example.com` | DRA device class |
@@ -122,15 +130,15 @@ Override any value with `--set key=value` or a custom values file.
 
 | Key | Default | Description |
 |---|---|---|
-| `pdDisaggregation.scenario` | `"llama"` | Scenario key (`llama`, `granite`, `mixed`) |
+| `pdDisaggregation.scenario` | `"llama-only"` | Scenario key (`llama-only`, `granite-only`, `mixed`) |
 | `pdDisaggregation.image.repository` | `ghcr.io/llm-d/llm-d-inference-sim` | Simulator image |
 | `pdDisaggregation.image.tag` | `"latest"` | Image tag |
+| `pdDisaggregation.image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `pdDisaggregation.port` | `8000` | Simulator HTTP port |
 | `pdDisaggregation.maxLoras` | `2` | Max LoRA adapters |
 | `pdDisaggregation.loraModules` | `[{"name":"food-review-1"}]` | LoRA module definitions |
-| `pdDisaggregation.llama.*` | see values.yaml | Llama model and claim template config |
-| `pdDisaggregation.granite.*` | see values.yaml | Granite model and claim template config |
-| `pdDisaggregation.scenario3.*` | see values.yaml | Replica overrides for scenario 3 |
+| `pdDisaggregation.claimTemplates.*` | see values.yaml | DRA ResourceClaimTemplate spec |
+| `pdDisaggregation.scenarios.*` | see values.yaml | Predefined specs for each scenario |
 
 ---
 
@@ -140,8 +148,7 @@ Override any value with `--set key=value` or a custom values file.
 # Copy and edit the values file
 cp demo/helm/values.yaml my-values.yaml
 # Edit my-values.yaml as needed, then install
-helm upgrade --install llm-d-inference-sim-demo ./demo/helm \
-  -f my-values.yaml
+helm upgrade --install llm-d-inference-sim-demo . -f my-values.yaml
 ```
 
 ---
@@ -163,7 +170,7 @@ Helm will remove resources that belong to the previous preset and create the new
 
 ```sh
 # Switch from DRA to pd-disaggregation granite scenario
-helm upgrade llm-d-inference-sim-demo ./demo/helm \
+helm upgrade llm-d-inference-sim-demo . \
   --set preset=pd-disaggregation \
   --set pdDisaggregation.scenario=granite-only
 ```
