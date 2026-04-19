@@ -1,0 +1,143 @@
+# Default values for llm-d-inference-sim-demo.
+# This is a YAML-formatted file.
+
+# ----------------------------------------------------------------------------
+# Preset selection
+# ----------------------------------------------------------------------------
+# Choose which demo scenario to deploy.
+#   "dra"               - Single simulator pod with a DRA vGPU ResourceClaim.
+#   "pd-disaggregation" - Prefill-decode disaggregated deployments backed by
+#                         DRA consumable capacity.
+preset: "dra"
+
+# ----------------------------------------------------------------------------
+# UDS Tokenizer sidecar (used by the dra preset only)
+# ----------------------------------------------------------------------------
+udsTokenizer:
+  image: ghcr.io/llm-d/llm-d-uds-tokenizer:v0.6.0
+  imagePullPolicy: IfNotPresent
+  logLevel: "DEBUG"
+  probePort: 8082
+
+# ----------------------------------------------------------------------------
+# DRA preset
+# ----------------------------------------------------------------------------
+dra:
+  image:
+    repository: ghcr.io/sunya-ch/llm-d-inference-sim
+    tag: "v0.8.2-dirty"
+    pullPolicy: IfNotPresent
+
+  model: "meta-llama/Llama-3.1-8B-Instruct"
+  port: 8000
+  maxModelLen: 4096
+  maxNumSeqs: 10
+
+  # Latency simulation (realistic values for an 8B model).
+  latency:
+    calculator: "per-token"
+    prefillOverhead: "20ms"
+    prefillTimePerToken: "5ms"
+    prefillTimeStdDev: "1ms"
+    interTokenLatency: "10ms"
+    timeFactorUnderLoad: "1.8"   # 80% slowdown at max load
+
+  # KV cache simulation.
+  kvCache:
+    enabled: true
+    size: 64
+    blockSize: 8
+    globalCacheHitThreshold: "0.8"
+
+  # Optional Hugging Face token injected as HF_TOKEN. Leave empty to skip.
+  hfToken: ""
+
+  # DRA ResourceClaim that allocates a virtual GPU for the simulator pod.
+  resourceClaim:
+    name: "vllm-sim-with-dra-claim"
+    deviceClassName: "vgpu.example.com"   # Provided by the DRA example driver (vgpu-profile branch)
+    memory: "20Gi"
+    compute: "40"
+
+# ----------------------------------------------------------------------------
+# PD-Disaggregation preset
+# ----------------------------------------------------------------------------
+pdDisaggregation:
+  # Active scenario. Must match one of the keys under `scenarios` below.
+  #   "llama-only"   - Llama-3.1-8B only  (2 prefill + 8 decode)
+  #   "granite-only" - Granite-2B only     (4 prefill + 24 decode)
+  #   "mixed"   - Both models         (Llama 1+4, Granite 2+12)
+  scenario: "llama-only"
+
+  image:
+    repository: ghcr.io/llm-d/llm-d-inference-sim
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  port: 8000
+  maxLoras: 2
+  loraModules:
+  - '{"name": "food-review-1"}'
+
+  # ------------------------------------------------------------------
+  # DRA ResourceClaimTemplate specifications (infrastructure config).
+  # Templates required by the active scenario are created automatically.
+  # ------------------------------------------------------------------
+  claimTemplates:
+    llama:
+      prefill:
+        name: "llm-d-prefill-llama"
+        deviceClassName: "vgpu.example.com"
+        gpuCount: 4
+        memory: "40Gi"
+        compute: "70"
+      decode:
+        name: "llm-d-decode-llama"
+        deviceClassName: "vgpu.example.com"
+        memory: "40Gi"
+        compute: "30"
+    granite:
+      prefill:
+        name: "llm-d-prefill-granite"
+        deviceClassName: "vgpu.example.com"
+        gpuCount: 2
+        memory: "20Gi"
+        compute: "40"
+      decode:
+        name: "llm-d-decode-granite"
+        deviceClassName: "vgpu.example.com"
+        memory: "20Gi"
+        compute: "20"
+
+  # ------------------------------------------------------------------
+  # Scenario definitions (workload config).
+  # Each scenario declares which models to deploy and how many replicas.
+  # Only the scenario selected by `scenario` above is deployed.
+  # ------------------------------------------------------------------
+  scenarios:
+    # Scenario: Llama-3.1-8B only
+    # Fits on a single 8-GPU node as: 2x(4GPU/70%compute) prefill + 8x(30%compute) decode
+    llama-only:
+      llama:
+        model: "meta-llama/Llama-3.1-8B-Instruct"
+        prefillReplicas: 2
+        decodeReplicas: 8
+
+    # Scenario: Granite-2B only
+    # Fits on a single 8-GPU node as: 4x(2GPU/40%compute) prefill + 24x(20%compute) decode
+    granite-only:
+      granite:
+        model: "ibm-granite/granite-speech-3.3-2b"
+        prefillReplicas: 4
+        decodeReplicas: 24
+
+    # Scenario: Mixed (Llama + Granite) on a single 8-GPU node
+    mixed:
+      llama:
+        model: "meta-llama/Llama-3.1-8B-Instruct"
+        prefillReplicas: 1
+        decodeReplicas: 4
+      granite:
+        model: "ibm-granite/granite-speech-3.3-2b"
+        prefillReplicas: 2
+        decodeReplicas: 12

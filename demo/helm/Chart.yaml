@@ -1,0 +1,11 @@
+apiVersion: v2
+name: llm-d-inference-sim-demo
+description: A Helm chart for llm-d-inference-sim demo scenarios (DRA and PD-Disaggregation)
+
+type: application
+
+# This is the chart version. Increment each time you make changes to the chart.
+version: 0.1.0
+
+# Application version corresponds to the llm-d-inference-sim simulator version.
+appVersion: "0.8.2"

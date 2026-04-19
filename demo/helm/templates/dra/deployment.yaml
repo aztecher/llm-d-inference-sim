@@ -1,0 +1,116 @@
+{{- if eq .Values.preset "dra" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-inference-sim-demo.fullname" . }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "llm-d-inference-sim-demo.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0%
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-inference-sim-demo.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 60
+      # UDS Tokenizer sidecar (native sidecar, K8s 1.29+).
+      # The simulator waits until this container's readinessProbe passes.
+      initContainers:
+      - name: uds-tokenizer
+        image: {{ .Values.udsTokenizer.image }}
+        imagePullPolicy: {{ .Values.udsTokenizer.imagePullPolicy }}
+        restartPolicy: Always
+        env:
+        - name: LOG_LEVEL
+          value: {{ .Values.udsTokenizer.logLevel | quote }}
+        - name: PROBE_PORT
+          value: {{ .Values.udsTokenizer.probePort | quote }}
+        {{- if .Values.dra.hfToken }}
+        - name: HF_TOKEN
+          value: {{ .Values.dra.hfToken | quote }}
+        {{- end }}
+        ports:
+        - name: health
+          containerPort: {{ .Values.udsTokenizer.probePort }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.udsTokenizer.probePort }}
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.udsTokenizer.probePort }}
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources: {}
+        volumeMounts:
+        - mountPath: /tmp/tokenizer
+          name: uds-socket
+      containers:
+      - name: vllm-sim
+        image: "{{ .Values.dra.image.repository }}:{{ .Values.dra.image.tag }}"
+        imagePullPolicy: {{ .Values.dra.image.pullPolicy }}
+        args:
+        # Model configuration
+        - --model={{ .Values.dra.model }}
+        - --port={{ .Values.dra.port }}
+        - --max-model-len={{ .Values.dra.maxModelLen }}
+        - --max-num-seqs={{ .Values.dra.maxNumSeqs }}
+        # Latency simulation
+        - --latency-calculator={{ .Values.dra.latency.calculator }}
+        - --prefill-overhead={{ .Values.dra.latency.prefillOverhead }}
+        - --prefill-time-per-token={{ .Values.dra.latency.prefillTimePerToken }}
+        - --prefill-time-std-dev={{ .Values.dra.latency.prefillTimeStdDev }}
+        - --inter-token-latency={{ .Values.dra.latency.interTokenLatency }}
+        - --time-factor-under-load={{ .Values.dra.latency.timeFactorUnderLoad }}
+        {{- if .Values.dra.kvCache.enabled }}
+        # KV cache simulation
+        - --enable-kvcache=true
+        - --kv-cache-size={{ .Values.dra.kvCache.size }}
+        - --block-size={{ .Values.dra.kvCache.blockSize }}
+        - --global-cache-hit-threshold={{ .Values.dra.kvCache.globalCacheHitThreshold }}
+        {{- end }}
+        env:
+        {{- include "llm-d-inference-sim-demo.podEnvVars" . | nindent 8 }}
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        ports:
+        - name: http
+          containerPort: {{ .Values.dra.port }}
+          protocol: TCP
+        resources:
+          claims:
+          - name: vgpu
+        volumeMounts:
+        - mountPath: /tmp/tokenizer
+          name: uds-socket
+      volumes:
+      - name: uds-socket
+        emptyDir: {}
+      # Bind the pod-level DRA claim so it is accessible inside the container.
+      resourceClaims:
+      - name: vgpu
+        resourceClaimName: {{ .Values.dra.resourceClaim.name }}
+{{- end }}

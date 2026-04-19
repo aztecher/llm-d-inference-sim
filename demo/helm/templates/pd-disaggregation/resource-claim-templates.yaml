@@ -1,0 +1,87 @@
+{{- if eq .Values.preset "pd-disaggregation" }}
+{{- $pd := .Values.pdDisaggregation }}
+{{- $sc := index $pd.scenarios $pd.scenario }}
+# ---------------------------------------------------------------------------
+# ResourceClaimTemplates for the active scenario: {{ $pd.scenario }}
+# Only templates required by the active scenario are created.
+# ---------------------------------------------------------------------------
+{{- if or (eq $pd.scenario "llama-only") (eq $pd.scenario "mixed") }}
+{{- $ct := $pd.claimTemplates.llama }}
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ $ct.prefill.name }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          count: {{ $ct.prefill.gpuCount }}
+          deviceClassName: {{ $ct.prefill.deviceClassName }}
+          capacity:
+            requests:
+              memory: {{ $ct.prefill.memory }}
+              compute: {{ $ct.prefill.compute | quote }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ $ct.decode.name }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: {{ $ct.decode.deviceClassName }}
+          capacity:
+            requests:
+              memory: {{ $ct.decode.memory }}
+              compute: {{ $ct.decode.compute | quote }}
+{{- end }}
+{{- if or (eq $pd.scenario "granite-only") (eq $pd.scenario "mixed") }}
+{{- $ct := $pd.claimTemplates.granite }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ $ct.prefill.name }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          count: {{ $ct.prefill.gpuCount }}
+          deviceClassName: {{ $ct.prefill.deviceClassName }}
+          capacity:
+            requests:
+              memory: {{ $ct.prefill.memory }}
+              compute: {{ $ct.prefill.compute | quote }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ $ct.decode.name }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: {{ $ct.decode.deviceClassName }}
+          capacity:
+            requests:
+              memory: {{ $ct.decode.memory }}
+              compute: {{ $ct.decode.compute | quote }}
+{{- end }}
+{{- end }}
