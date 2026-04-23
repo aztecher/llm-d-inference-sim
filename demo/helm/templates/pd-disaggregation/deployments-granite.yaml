@@ -1,0 +1,108 @@
+{{- if eq .Values.preset "pd-disaggregation" }}
+{{- $pd := .Values.pdDisaggregation }}
+{{- $sc := index $pd.scenarios $pd.scenario }}
+{{- if or (eq $pd.scenario "granite-only") (eq $pd.scenario "mixed") }}
+{{- $ct := $pd.claimTemplates.granite }}
+# ---------------------------------------------------------------------------
+# Granite-2B Prefill deployment
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-granite-2b-prefill
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+    llm-d/role: prefill
+    llm-d/model: granite-2b
+spec:
+  replicas: {{ $sc.granite.prefillReplicas }}
+  selector:
+    matchLabels:
+      app: vllm-granite-2b-prefill
+  template:
+    metadata:
+      labels:
+        app: vllm-granite-2b-prefill
+        llm-d/role: prefill
+        llm-d/model: granite-2b
+    spec:
+      containers:
+      - name: vllm-sim
+        image: "{{ $pd.image.repository }}:{{ $pd.image.tag }}"
+        imagePullPolicy: {{ $pd.image.pullPolicy }}
+        args:
+        - --model
+        - {{ $sc.granite.model }}
+        - --port
+        - {{ $pd.port | quote }}
+        - --max-loras
+        - {{ $pd.maxLoras | quote }}
+        {{- range $pd.loraModules }}
+        - --lora-modules
+        - {{ . | quote }}
+        {{- end }}
+        env:
+        {{- include "llm-d-inference-sim-demo.podEnvVars" . | nindent 8 }}
+        ports:
+        - name: http
+          containerPort: {{ $pd.port }}
+          protocol: TCP
+        resources:
+          claims:
+          - name: shared-gpu
+      resourceClaims:
+      - name: shared-gpu
+        resourceClaimTemplateName: {{ $ct.prefill.name }}
+---
+# ---------------------------------------------------------------------------
+# Granite-2B Decode deployment
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-granite-2b-decode
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+    llm-d/role: decode
+    llm-d/model: granite-2b
+spec:
+  replicas: {{ $sc.granite.decodeReplicas }}
+  selector:
+    matchLabels:
+      app: vllm-granite-2b-decode
+  template:
+    metadata:
+      labels:
+        app: vllm-granite-2b-decode
+        llm-d/role: decode
+        llm-d/model: granite-2b
+    spec:
+      containers:
+      - name: vllm-sim
+        image: "{{ $pd.image.repository }}:{{ $pd.image.tag }}"
+        imagePullPolicy: {{ $pd.image.pullPolicy }}
+        args:
+        - --model
+        - {{ $sc.granite.model }}
+        - --port
+        - {{ $pd.port | quote }}
+        - --max-loras
+        - {{ $pd.maxLoras | quote }}
+        {{- range $pd.loraModules }}
+        - --lora-modules
+        - {{ . | quote }}
+        {{- end }}
+        env:
+        {{- include "llm-d-inference-sim-demo.podEnvVars" . | nindent 8 }}
+        ports:
+        - name: http
+          containerPort: {{ $pd.port }}
+          protocol: TCP
+        resources:
+          claims:
+          - name: shared-gpu
+      resourceClaims:
+      - name: shared-gpu
+        resourceClaimTemplateName: {{ $ct.decode.name }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,18 @@
+{{- if eq .Values.preset "dra" }}
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: {{ .Values.dra.resourceClaim.name }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  devices:
+    requests:
+    - name: gpu
+      exactly:
+        deviceClassName: {{ .Values.dra.resourceClaim.deviceClassName }}
+        capacity:
+          requests:
+            memory: {{ .Values.dra.resourceClaim.memory | quote }}
+            compute: {{ .Values.dra.resourceClaim.compute | quote }}
+{{- end }}

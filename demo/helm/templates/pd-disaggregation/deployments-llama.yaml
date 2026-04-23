@@ -1,0 +1,108 @@
+{{- if eq .Values.preset "pd-disaggregation" }}
+{{- $pd := .Values.pdDisaggregation }}
+{{- $sc := index $pd.scenarios $pd.scenario }}
+{{- if or (eq $pd.scenario "llama-only") (eq $pd.scenario "mixed") }}
+{{- $ct := $pd.claimTemplates.llama }}
+# ---------------------------------------------------------------------------
+# Llama-3.1-8B Prefill deployment
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama3-8b-instruct-prefill
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+    llm-d/role: prefill
+    llm-d/model: llama3-8b-instruct
+spec:
+  replicas: {{ $sc.llama.prefillReplicas }}
+  selector:
+    matchLabels:
+      app: vllm-llama3-8b-instruct-prefill
+  template:
+    metadata:
+      labels:
+        app: vllm-llama3-8b-instruct-prefill
+        llm-d/role: prefill
+        llm-d/model: llama3-8b-instruct
+    spec:
+      containers:
+      - name: vllm-sim
+        image: "{{ $pd.image.repository }}:{{ $pd.image.tag }}"
+        imagePullPolicy: {{ $pd.image.pullPolicy }}
+        args:
+        - --model
+        - {{ $sc.llama.model }}
+        - --port
+        - {{ $pd.port | quote }}
+        - --max-loras
+        - {{ $pd.maxLoras | quote }}
+        {{- range $pd.loraModules }}
+        - --lora-modules
+        - {{ . | quote }}
+        {{- end }}
+        env:
+        {{- include "llm-d-inference-sim-demo.podEnvVars" . | nindent 8 }}
+        ports:
+        - name: http
+          containerPort: {{ $pd.port }}
+          protocol: TCP
+        resources:
+          claims:
+          - name: shared-gpu
+      resourceClaims:
+      - name: shared-gpu
+        resourceClaimTemplateName: {{ $ct.prefill.name }}
+---
+# ---------------------------------------------------------------------------
+# Llama-3.1-8B Decode deployment
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama3-8b-instruct-decode
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+    llm-d/role: decode
+    llm-d/model: llama3-8b-instruct
+spec:
+  replicas: {{ $sc.llama.decodeReplicas }}
+  selector:
+    matchLabels:
+      app: vllm-llama3-8b-instruct-decode
+  template:
+    metadata:
+      labels:
+        app: vllm-llama3-8b-instruct-decode
+        llm-d/role: decode
+        llm-d/model: llama3-8b-instruct
+    spec:
+      containers:
+      - name: vllm-sim
+        image: "{{ $pd.image.repository }}:{{ $pd.image.tag }}"
+        imagePullPolicy: {{ $pd.image.pullPolicy }}
+        args:
+        - --model
+        - {{ $sc.llama.model }}
+        - --port
+        - {{ $pd.port | quote }}
+        - --max-loras
+        - {{ $pd.maxLoras | quote }}
+        {{- range $pd.loraModules }}
+        - --lora-modules
+        - {{ . | quote }}
+        {{- end }}
+        env:
+        {{- include "llm-d-inference-sim-demo.podEnvVars" . | nindent 8 }}
+        ports:
+        - name: http
+          containerPort: {{ $pd.port }}
+          protocol: TCP
+        resources:
+          claims:
+          - name: shared-gpu
+      resourceClaims:
+      - name: shared-gpu
+        resourceClaimTemplateName: {{ $ct.decode.name }}
+{{- end }}
+{{- end }}

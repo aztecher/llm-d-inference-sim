@@ -1,0 +1,38 @@
+llm-d-inference-sim-demo deployed with preset: {{ .Values.preset }}
+
+{{- if eq .Values.preset "dra" }}
+
+=== DRA Demo ===
+
+A single simulator pod backed by ResourceClaim/{{ .Values.dra.resourceClaim.name }} has been created.
+
+  kubectl get pods,resourceclaims -n {{ .Release.Namespace }}
+
+Port-forward and test:
+
+  kubectl port-forward -n {{ .Release.Namespace }} \
+    deploy/{{ include "llm-d-inference-sim-demo.fullname" . }} \
+    {{ .Values.dra.port }}:{{ .Values.dra.port }} &
+
+  curl -X POST http://localhost:{{ .Values.dra.port }}/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"{{ .Values.dra.model }}","messages":[{"role":"user","content":"Hello!"}]}'
+
+{{- else if eq .Values.preset "pd-disaggregation" }}
+{{- $pd := .Values.pdDisaggregation }}
+{{- $sc := index $pd.scenarios $pd.scenario }}
+
+=== PD-Disaggregation Demo (scenario: {{ $pd.scenario }}) ===
+
+{{- if or (eq $pd.scenario "llama-only") (eq $pd.scenario "mixed") }}
+  Llama-3.1-8B  prefill → deploy/vllm-llama3-8b-instruct-prefill  ({{ $sc.llama.prefillReplicas }} replicas)
+  Llama-3.1-8B  decode  → deploy/vllm-llama3-8b-instruct-decode   ({{ $sc.llama.decodeReplicas }} replicas)
+{{- end }}
+{{- if or (eq $pd.scenario "granite-only") (eq $pd.scenario "mixed") }}
+  Granite-2B    prefill → deploy/vllm-granite-2b-prefill           ({{ $sc.granite.prefillReplicas }} replicas)
+  Granite-2B    decode  → deploy/vllm-granite-2b-decode            ({{ $sc.granite.decodeReplicas }} replicas)
+{{- end }}
+
+  kubectl get pods,resourceclaims -n {{ .Release.Namespace }}
+
+{{- end }}
