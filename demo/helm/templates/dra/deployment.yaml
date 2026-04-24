@@ -112,5 +112,5 @@ spec:
       # Bind the pod-level DRA claim so it is accessible inside the container.
       resourceClaims:
       - name: vgpu
-        resourceClaimName: {{ .Values.dra.resourceClaim.name }}
+        resourceClaimTemplateName: {{ .Values.dra.resourceClaimTemplate.name }}
 {{- end }}

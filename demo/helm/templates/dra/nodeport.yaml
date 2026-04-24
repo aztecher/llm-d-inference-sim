@@ -1,0 +1,17 @@
+{{- if eq .Values.preset "dra" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-inference-sim-demo.fullname" . }}-nodeport
+spec:
+  ports:
+  - appProtocol: http
+    name: default
+    nodePort: 30080
+    port: {{ .Values.dra.port }}
+    protocol: TCP
+    targetPort: {{ .Values.dra.port }}
+  selector:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+  type: NodePort
+{{- end }}

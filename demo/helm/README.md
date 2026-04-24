@@ -127,10 +127,10 @@ Override any value with `--set key=value` or a custom values file.
 | `dra.latency.*` | see values.yaml | Latency simulation parameters |
 | `dra.kvCache.*` | see values.yaml | KV-cache simulation parameters |
 | `dra.hfToken` | `""` | Hugging Face token (optional) |
-| `dra.resourceClaim.name` | `vllm-sim-with-dra-claim` | ResourceClaim name |
-| `dra.resourceClaim.deviceClassName` | `vgpu.example.com` | DRA device class |
-| `dra.resourceClaim.memory` | `"20Gi"` | GPU memory requested |
-| `dra.resourceClaim.compute` | `"40"` | Compute units requested |
+| `dra.resourceClaimTemplate.name` | `vllm-sim-with-dra-claim` | ResourceClaimTemplate name |
+| `dra.resourceClaimTemplate.deviceClassName` | `vgpu.example.com` | DRA device class |
+| `dra.resourceClaimTemplate.memory` | `"20Gi"` | GPU memory requested |
+| `dra.resourceClaimTemplate.compute` | `"40"` | Compute units requested |
 
 ### PD-Disaggregation preset
 

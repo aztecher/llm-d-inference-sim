@@ -37,8 +37,8 @@ dra:
   latency:
     calculator: "per-token"
     prefillOverhead: "20ms"
-    prefillTimePerToken: "5ms"
-    prefillTimeStdDev: "1ms"
+    prefillTimePerToken: "0.05ms"
+    prefillTimeStdDev: "0.01ms"
     interTokenLatency: "10ms"
     timeFactorUnderLoad: "1.8"   # 80% slowdown at max load
 
@@ -52,8 +52,8 @@ dra:
   # Optional Hugging Face token injected as HF_TOKEN. Leave empty to skip.
   hfToken: ""
 
-  # DRA ResourceClaim that allocates a virtual GPU for the simulator pod.
-  resourceClaim:
+  # DRA resourceClaimTemplate that allocates a virtual GPU for the simulator pod.
+  resourceClaimTemplate:
     name: "vllm-sim-with-dra-claim"
     deviceClassName: "vgpu.example.com"   # Provided by the DRA example driver (vgpu-profile branch)
     memory: "20Gi"

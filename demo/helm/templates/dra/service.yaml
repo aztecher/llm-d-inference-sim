@@ -1,0 +1,17 @@
+{{- if eq .Values.preset "dra" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-inference-sim-demo.fullname" . }}
+  labels:
+    {{- include "llm-d-inference-sim-demo.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.dra.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "llm-d-inference-sim-demo.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -4,7 +4,7 @@ llm-d-inference-sim-demo deployed with preset: {{ .Values.preset }}
 
 === DRA Demo ===
 
-A single simulator pod backed by ResourceClaim/{{ .Values.dra.resourceClaim.name }} has been created.
+A single simulator pod backed by ResourceClaim/{{ .Values.dra.resourceClaimTemplate.name }} has been created.
 
   kubectl get pods,resourceclaims -n {{ .Release.Namespace }}
 
