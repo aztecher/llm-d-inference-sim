@@ -65,15 +65,22 @@ func (tm *TokenizerManager) Init(ctx context.Context, logger logr.Logger) error 
 	// run tokenizer for real model in container
 	address, cleanup, err := tm.startTokenizerContainer(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to start tokenizer container (this may be due to Docker registry authentication issues): %w", err)
 	}
 	tm.qwenCleanup = cleanup
 	tm.qwenTokenizer, err = tm.newTokenizer(ctx, address, common.QwenModelName)
-	return err
+	if err != nil {
+		// Clean up the container if tokenizer creation fails
+		tm.Clean()
+		return err
+	}
+	return nil
 }
 
 func (tm *TokenizerManager) Clean() {
-	tm.qwenCleanup()
+	if tm.qwenCleanup != nil {
+		tm.qwenCleanup()
+	}
 }
 
 // starts a tokenizer in a docker container
