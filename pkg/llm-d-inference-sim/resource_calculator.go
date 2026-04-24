@@ -19,12 +19,66 @@ package llmdinferencesim
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-inference-sim/pkg/common"
 )
+
+const (
+	MaxMemoryOverheadFactor = 1.3 // Allow up to 30% overhead for framework variations
+	MinMaxThreads           = 30720
+	MinHiddenSize           = 128
+)
+
+// GPUSpecs contains specifications for different GPU types
+type GPUSpecs struct {
+	Name                           string
+	VRAM                           int     // GB
+	MemoryBW                       float64 // TB/s
+	PeakTFLOPS                     float64 // FP16/BF16
+	PeakFP8                        float64 // FP8 TFLOPS
+	MaxThreads                     int     // Typical hardware thread capacity
+	UnderprovisionContentionImpact float64 // 0.0 to 1.0
+	OverprovisionSpeedUp           float64 // 0.0 to 1.0
+}
+
+var gpuRegistry = map[string]GPUSpecs{
+	"NVIDIA-H200-SXM5-141GB": {Name: "NVIDIA-H200-SXM5-141GB", VRAM: 141, MemoryBW: 4.8, PeakTFLOPS: 989.0, PeakFP8: 3958.0, MaxThreads: 249856, UnderprovisionContentionImpact: 0.08, OverprovisionSpeedUp: 0.5},
+	"NVIDIA-H100-SXM5-80GB":  {Name: "NVIDIA-H100-SXM5-80GB", VRAM: 80, MemoryBW: 3.35, PeakTFLOPS: 989.0, PeakFP8: 1979.0, MaxThreads: 184320, UnderprovisionContentionImpact: 0.15, OverprovisionSpeedUp: 0.35},
+	"NVIDIA-A100-SXM4-80GB":  {Name: "NVIDIA-A100-SXM4-80GB", VRAM: 80, MemoryBW: 2.0, PeakTFLOPS: 312.0, PeakFP8: 0.0, MaxThreads: 108544, UnderprovisionContentionImpact: 0.3, OverprovisionSpeedUp: 0.2},
+	"NVIDIA-L4-24GB":         {Name: "NVIDIA-L4-24GB", VRAM: 24, MemoryBW: 0.3, PeakTFLOPS: 121.0, PeakFP8: 242.0, MaxThreads: 30720, UnderprovisionContentionImpact: 0.7, OverprovisionSpeedUp: 0.05},
+}
+
+// ArchParams contains model architecture parameters
+type ArchParams struct {
+	ParametersB float64
+	Layers      int
+	KVHeads     int
+	HiddenSize  int
+	QueryHeads  int
+	Precision   int
+}
+
+var modelFamilyMap = map[string]ArchParams{
+	"llama-3-8b":   {ParametersB: 8.0, Layers: 32, KVHeads: 8, HiddenSize: 4096, QueryHeads: 32, Precision: 2},
+	"llama-3.1-8b": {ParametersB: 8.0, Layers: 32, KVHeads: 8, HiddenSize: 4096, QueryHeads: 32, Precision: 2},
+	"llama-3-70b":  {ParametersB: 70.0, Layers: 80, KVHeads: 8, HiddenSize: 8192, QueryHeads: 64, Precision: 2},
+	"mistral-nemo": {ParametersB: 12.0, Layers: 40, KVHeads: 8, HiddenSize: 5120, QueryHeads: 32, Precision: 2},
+	"phi-3-mini":   {ParametersB: 3.8, Layers: 32, KVHeads: 8, HiddenSize: 3072, QueryHeads: 32, Precision: 2},
+	"phi-3-medium": {ParametersB: 14.0, Layers: 40, KVHeads: 8, HiddenSize: 5120, QueryHeads: 40, Precision: 2},
+}
+
+// ComplexityMetrics contains model complexity information
+type ComplexityMetrics struct {
+	FlopsPerToken       float64 // Total FLOPs for one forward pass of one token
+	ArithmeticIntensity float64 // FLOPs / Bytes (Determines if Compute or Memory bound)
+	MinThreads          int     // Suggested minimum threads to saturate the hidden dimension
+}
 
 // GPUResourceLimits holds the resource limits for a single GPU device
 type GPUResourceLimits struct {
@@ -73,18 +127,24 @@ type ResourceParams struct {
 	KVCacheSizeTokens int
 }
 
-type defaultResourceCalculator struct {
-	gpuLimits []GPUResourceLimits
-	// Base memory per token in bytes (approximate)
-	baseMemoryPerToken int64
-	// Memory overhead for model and KV cache in bytes
-	modelOverheadBytes int64
-	// Thread utilization factor per token
-	threadUtilizationPerToken float64
-	// Base thread utilization percentage
-	baseThreadUtilization float64
-	// Model complexity factor (based on model size)
-	modelComplexityFactor float64
+// queueTheoryResourceCalculator implements ResourceCalculator using queue theory
+type queueTheoryResourceCalculator struct {
+	gpuLimits                   []GPUResourceLimits
+	modelID                     string
+	validParamsInBillions       bool
+	paramsFound                 bool
+	params                      *ArchParams
+	complexity                  ComplexityMetrics
+	effectiveBatchSize          float64
+	maxNumBatchedTokens         *int32
+	modelSize                   float64
+	memoryPerToken              float64
+	activeMemoryPerPrefillToken float64
+	gpuFound                    bool
+	gpuSpec                     *GPUSpecs
+	memoryOverheadFactor        float64
+	minMemoryUsage              float64
+	logger                      logr.Logger
 }
 
 // NewResourceCalculator creates a new resource calculator based on configuration
@@ -99,216 +159,104 @@ func NewResourceCalculator(config *common.Configuration) (ResourceCalculator, er
 		return nil, nil
 	}
 
-	// Estimate base memory per token based on model size
-	// This is a simplified estimation - in reality, it depends on model architecture
-	// Typical values: ~2-4 bytes per token for KV cache per layer
-	baseMemoryPerToken := int64(16) // bytes per token (conservative estimate)
+	// Create logger
+	logger := logr.Discard() // Use discard logger by default
 
-	// Estimate model size (weights) based on model name
-	// This includes model weights in FP16 precision
-	modelOverheadBytes := estimateModelSize(config.Model)
+	// Determine effective batch size
+	effectiveBatchSize := float64(config.MaxNumSeqs)
 
-	// Calculate model complexity factor based on model size
-	// Larger models require more computation per token
-	modelComplexityFactor := estimateModelComplexity(config.Model)
+	// Get GPU name from environment or use default
+	gpuName := os.Getenv("GPU_MODEL_NAME_0")
+	if gpuName == "" {
+		gpuName = "NVIDIA-A100-SXM4-80GB" // default
+	}
 
-	return &defaultResourceCalculator{
-		gpuLimits:                 gpuLimits,
-		baseMemoryPerToken:        baseMemoryPerToken,
-		modelOverheadBytes:        modelOverheadBytes,
-		threadUtilizationPerToken: 0.1,                   // 0.1% per token (base)
-		baseThreadUtilization:     5.0,                   // 5% base utilization
-		modelComplexityFactor:     modelComplexityFactor, // Model size multiplier
+	// Infer model parameters
+	paramsFound, params := inferredArchParams(config.Model, logger)
+	validParamsInBillions, _ := extractParams(config.Model, logger)
+
+	// Get GPU specs
+	gpuFound, gpuSpec := getGPUSpecs(gpuName, logger)
+	if !gpuFound {
+		_, gpuSpec = getGPUSpecs("NVIDIA-A100-SXM4-80GB", logger)
+	}
+
+	return &queueTheoryResourceCalculator{
+		gpuLimits:                   gpuLimits,
+		modelID:                     config.Model,
+		validParamsInBillions:       validParamsInBillions,
+		paramsFound:                 paramsFound,
+		params:                      &params,
+		complexity:                  estimateModelComplexity(config.Model, params.ParametersB, params.HiddenSize),
+		effectiveBatchSize:          effectiveBatchSize,
+		maxNumBatchedTokens:         nil,
+		modelSize:                   estimateModelSizeQT(config.Model, params.ParametersB, params.Precision),
+		memoryPerToken:              estimateMemoryPerTokenFromID(params, params.Precision),
+		activeMemoryPerPrefillToken: estimateActiveMemoryPerTokenFromID(effectiveBatchSize, params, params.Precision),
+		gpuFound:                    gpuFound,
+		gpuSpec:                     gpuSpec,
+		memoryOverheadFactor:        1.2, // default 20% - more realistic for vLLM
+		logger:                      logger,
 	}, nil
 }
 
-// estimateModelSize estimates the model weight memory size based on model name
-// Assumes FP16 precision (2 bytes per parameter)
-func estimateModelSize(modelName string) int64 {
-	modelNameLower := strings.ToLower(modelName)
-
-	// Extract parameter count from model name
-	// Common patterns: "7b", "8b", "13b", "70b", etc.
-
-	// Check for specific model sizes
-	if strings.Contains(modelNameLower, "405b") {
-		return 405 * 1024 * 1024 * 1024 * 2 // 405B params × 2 bytes = 810 GB
-	}
-	if strings.Contains(modelNameLower, "175b") {
-		return 175 * 1024 * 1024 * 1024 * 2 // 175B params × 2 bytes = 350 GB
-	}
-	if strings.Contains(modelNameLower, "70b") {
-		return 70 * 1024 * 1024 * 1024 * 2 // 70B params × 2 bytes = 140 GB
-	}
-	if strings.Contains(modelNameLower, "65b") {
-		return 65 * 1024 * 1024 * 1024 * 2 // 65B params × 2 bytes = 130 GB
-	}
-	if strings.Contains(modelNameLower, "34b") {
-		return 34 * 1024 * 1024 * 1024 * 2 // 34B params × 2 bytes = 68 GB
-	}
-	if strings.Contains(modelNameLower, "33b") {
-		return 33 * 1024 * 1024 * 1024 * 2 // 33B params × 2 bytes = 66 GB
-	}
-	if strings.Contains(modelNameLower, "13b") {
-		return 13 * 1024 * 1024 * 1024 * 2 // 13B params × 2 bytes = 26 GB
-	}
-	if strings.Contains(modelNameLower, "8b") {
-		return 8 * 1024 * 1024 * 1024 * 2 // 8B params × 2 bytes = 16 GB
-	}
-	if strings.Contains(modelNameLower, "7b") {
-		return 7 * 1024 * 1024 * 1024 * 2 // 7B params × 2 bytes = 14 GB
-	}
-	if strings.Contains(modelNameLower, "3b") {
-		return 3 * 1024 * 1024 * 1024 * 2 // 3B params × 2 bytes = 6 GB
-	}
-	if strings.Contains(modelNameLower, "1b") {
-		return 1 * 1024 * 1024 * 1024 * 2 // 1B params × 2 bytes = 2 GB
-	}
-
-	// Default: assume 7B model if size not detected
-	// Add 2GB overhead for framework, CUDA, etc.
-	return (7 * 1024 * 1024 * 1024 * 2) + (2 * 1024 * 1024 * 1024) // 14 GB + 2 GB = 16 GB
-}
-
-// estimateModelComplexity estimates the computational complexity factor based on model size
-// Larger models require more computation per token, affecting thread utilization
-func estimateModelComplexity(modelName string) float64 {
-	modelNameLower := strings.ToLower(modelName)
-
-	// Complexity factor scales with model size
-	// Baseline: 7B model = 1.0
-	// Larger models require proportionally more computation
-
-	if strings.Contains(modelNameLower, "405b") {
-		return 6.0 // 405B is ~58x larger than 7B, but not linear scaling
-	}
-	if strings.Contains(modelNameLower, "175b") {
-		return 4.5 // 175B is ~25x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "70b") {
-		return 3.0 // 70B is ~10x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "65b") {
-		return 2.8 // 65B is ~9x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "34b") {
-		return 2.0 // 34B is ~5x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "33b") {
-		return 2.0 // 33B is ~5x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "13b") {
-		return 1.4 // 13B is ~2x larger than 7B
-	}
-	if strings.Contains(modelNameLower, "8b") {
-		return 1.1 // 8B is slightly larger than 7B
-	}
-	if strings.Contains(modelNameLower, "7b") {
-		return 1.0 // 7B is baseline
-	}
-	if strings.Contains(modelNameLower, "3b") {
-		return 0.6 // 3B is smaller than 7B
-	}
-	if strings.Contains(modelNameLower, "1b") {
-		return 0.3 // 1B is much smaller than 7B
-	}
-
-	// Default: assume 7B model complexity
-	return 1.0
-}
-
-// CalculateResourceConsumption estimates resource consumption for a request
-// Returns a slice of ResourceConsumption, one for each GPU device, with resources
-// distributed equally across all GPUs
-func (r *defaultResourceCalculator) CalculateResourceConsumption(params *ResourceParams) []ResourceConsumption {
+// CalculateResourceConsumption estimates resource consumption using queue theory
+func (r *queueTheoryResourceCalculator) CalculateResourceConsumption(params *ResourceParams) []ResourceConsumption {
 	if len(r.gpuLimits) == 0 {
 		return []ResourceConsumption{}
 	}
 
 	numGPUs := len(r.gpuLimits)
 
-	// Calculate total memory usage first
-	// Memory = model overhead + request-specific memory + KV cache memory
-
-	// Request-specific memory: (prompt tokens - cached tokens) * memory per token + generation tokens * memory per token
-	effectivePromptTokens := params.PromptTokens - params.CachedPromptTokens
-	totalTokens := effectivePromptTokens + params.GenerationTokens
-	requestMemory := int64(totalTokens) * r.baseMemoryPerToken
-
-	// KV cache memory: Calculate based on KV cache usage percentage and total capacity
-	// KV cache stores key-value pairs for all tokens in the cache
-	// Memory per token in KV cache is typically higher than base memory per token
-	// because it stores both keys and values across all layers
-	kvCacheMemory := int64(0)
-	if params.KVCacheSizeTokens > 0 {
-		// KV cache memory per token is approximately 2x base memory per token
-		// (one for keys, one for values, across all layers)
-		kvCacheMemoryPerToken := r.baseMemoryPerToken * 2
-		kvCacheMemory = int64(float64(params.KVCacheSizeTokens) * params.KVCacheUsagePercentage * float64(kvCacheMemoryPerToken))
+	// Calculate cached hit ratio
+	cachedHitRatio := 0.0
+	if params.PromptTokens > 0 {
+		cachedHitRatio = float64(params.CachedPromptTokens) / float64(params.PromptTokens)
 	}
 
-	// Total memory = model overhead + request memory + KV cache memory
-	totalMemoryUsage := r.modelOverheadBytes + requestMemory + kvCacheMemory
-
-	// Calculate total thread utilization
-	// Thread utilization increases with number of tokens, model complexity, and running requests
-	totalThreadUtilization := r.baseThreadUtilization + float64(totalTokens)*r.threadUtilizationPerToken
-
-	// Apply model complexity factor - larger models require more computation per token
-	// This affects thread utilization as more GPU cores are engaged for larger models
-	totalThreadUtilization *= r.modelComplexityFactor
-
-	// Factor in KV cache pressure - higher cache usage increases thread utilization
-	// as more memory bandwidth is needed for cache lookups
-	if params.KVCacheUsagePercentage > 0.5 {
-		// Add 5-15% thread utilization when cache is >50% full
-		cachePressureFactor := 1.0 + ((params.KVCacheUsagePercentage - 0.5) * 0.3)
-		totalThreadUtilization *= cachePressureFactor
+	// Calculate prefill tokens (tokens that actually need to be computed)
+	prefillTokens := float64(params.PromptTokens) * (1.0 - cachedHitRatio) * r.effectiveBatchSize
+	if r.maxNumBatchedTokens != nil {
+		prefillTokens = math.Min(prefillTokens, float64(*r.maxNumBatchedTokens))
 	}
 
-	// Factor in concurrent requests (more requests = higher utilization)
-	if params.RunningReqs > 1 {
-		concurrencyFactor := 1.0 + (float64(params.RunningReqs-1) * 0.15) // 15% increase per additional request
-		totalThreadUtilization *= concurrencyFactor
-	}
+	// Estimate thread occupancy
+	threadOccupancy := r.estimateThreadOccupancy(r.effectiveBatchSize, prefillTokens, numGPUs)
 
-	// Distribute resources equally across all GPUs
-	memoryPerGPU := totalMemoryUsage / int64(numGPUs)
-	threadPerGPU := totalThreadUtilization / float64(numGPUs)
+	// Estimate memory usage
+	memoryUsageGB := r.estimateMemoryUsage(params.PromptTokens, params.GenerationTokens, prefillTokens, numGPUs)
+
+	// Convert to per-GPU values
+	threadPerGPU := threadOccupancy / float64(numGPUs)
+	memoryPerGPU := int64(memoryUsageGB * 1e9 / float64(numGPUs))
 
 	// Create consumption entries for each GPU
 	consumptions := make([]ResourceConsumption, numGPUs)
 	for i, gpuLimit := range r.gpuLimits {
-		memoryUsage := memoryPerGPU
 		threadUtilization := threadPerGPU
+		memoryUsage := memoryPerGPU
 
-		// Apply memory limit constraint for this GPU
+		// Apply memory limit constraint
 		if memoryUsage > gpuLimit.MemoryLimitBytes {
-			log.Printf("[ResourceCalculator] Memory usage %d bytes (%.2f GB) per GPU exceeds limit %d bytes (%.2f GB) (DeviceID: %d, TotalMemory: %d, NumGPUs: %d, PromptTokens: %d, GenerationTokens: %d)",
+			log.Printf("[ResourceCalculator] Memory usage %d bytes (%.2f GB) per GPU exceeds limit %d bytes (%.2f GB) (DeviceID: %d)",
 				memoryUsage, float64(memoryUsage)/(1024*1024*1024),
 				gpuLimit.MemoryLimitBytes, float64(gpuLimit.MemoryLimitBytes)/(1024*1024*1024),
-				gpuLimit.DeviceID, totalMemoryUsage, numGPUs,
-				params.PromptTokens, params.GenerationTokens)
-
+				gpuLimit.DeviceID)
 			memoryUsage = gpuLimit.MemoryLimitBytes
 		}
 
-		// Apply thread percentage limit constraint for this GPU
+		// Apply thread percentage limit constraint
 		if threadUtilization > gpuLimit.ActiveThreadPercentage {
-			log.Printf("[ResourceCalculator] Thread utilization %.2f%% per GPU exceeds limit %.2f%% (DeviceID: %d, TotalThreads: %.2f%%, NumGPUs: %d, PromptTokens: %d, GenerationTokens: %d, RunningReqs: %d, KVCacheUsage: %.2f%%)",
-				threadUtilization, gpuLimit.ActiveThreadPercentage, gpuLimit.DeviceID,
-				totalThreadUtilization, numGPUs,
-				params.PromptTokens, params.GenerationTokens, params.RunningReqs, params.KVCacheUsagePercentage*100)
+			log.Printf("[ResourceCalculator] Thread utilization %.2f%% per GPU exceeds limit %.2f%% (DeviceID: %d)",
+				threadUtilization, gpuLimit.ActiveThreadPercentage, gpuLimit.DeviceID)
 			threadUtilization = gpuLimit.ActiveThreadPercentage
 		}
 
 		// Ensure thread utilization is within valid range
 		if threadUtilization < 0 {
-			log.Printf("[ResourceCalculator] Thread utilization %.2f%% is negative, capping to 0 (DeviceID: %d)", threadUtilization, gpuLimit.DeviceID)
 			threadUtilization = 0
 		}
 		if threadUtilization > 100 {
-			log.Printf("[ResourceCalculator] Thread utilization %.2f%% exceeds 100%%, capping to 100 (DeviceID: %d)", threadUtilization, gpuLimit.DeviceID)
 			threadUtilization = 100
 		}
 
@@ -322,15 +270,171 @@ func (r *defaultResourceCalculator) CalculateResourceConsumption(params *Resourc
 	return consumptions
 }
 
+// estimateThreadOccupancy estimates GPU thread utilization
+func (r *queueTheoryResourceCalculator) estimateThreadOccupancy(effectiveBatch, prefillTokens float64, numGPU int) float64 {
+	// Prefill phase: Parallelizes across the entire effective prompt
+	prefillThreads := prefillTokens * float64(r.complexity.MinThreads)
+	// Decode phase: Parallelizes across every sequence in the batch
+	decodeThreads := effectiveBatch * float64(r.complexity.MinThreads)
+
+	// Total active threads
+	totalActiveThreads := prefillThreads + decodeThreads
+
+	// Compare against hardware capacity
+	occupancy := (totalActiveThreads / float64(r.gpuSpec.MaxThreads*numGPU)) * 100
+
+	// Cap at 100%
+	if occupancy > 100.0 {
+		occupancy = 100.0
+	}
+
+	return occupancy
+}
+
+// estimateMemoryUsage estimates memory usage in GB
+func (r *queueTheoryResourceCalculator) estimateMemoryUsage(promptLen int, outputLen int, prefillTokens float64, numGPU int) float64 {
+	totalTokens := float64(promptLen+outputLen) * float64(r.effectiveBatchSize)
+	modelWeight := r.modelSize / float64(numGPU)
+	kvCacheMem := (float64(r.effectiveBatchSize) * totalTokens * r.memoryPerToken) / float64(numGPU) / 1e9
+	activationMem := r.activeMemoryPerPrefillToken * float64(prefillTokens) / float64(numGPU) / 1e9
+
+	// Add attention memory for long contexts
+	attentionMem := r.estimateAttentionMemory(promptLen, prefillTokens) / float64(numGPU)
+
+	totalMemoryGBPerGPU := (modelWeight + kvCacheMem + activationMem + attentionMem) * r.memoryOverheadFactor
+
+	return totalMemoryGBPerGPU
+}
+
+// estimateAttentionMemory calculates additional memory needed for attention computation
+func (r *queueTheoryResourceCalculator) estimateAttentionMemory(seqLen int, prefillTokens float64) float64 {
+	// For sequences <= 8K tokens, FlashAttention makes attention memory negligible
+	if seqLen <= 8192 {
+		return 0
+	}
+
+	// For long contexts, add a sublinear scaling factor
+	longContextFactor := math.Pow(float64(seqLen)/8192.0, 1.3)
+
+	// Estimate attention overhead
+	attentionOverhead := prefillTokens * float64(r.params.HiddenSize) * float64(r.params.Precision) * longContextFactor * 0.1
+
+	return attentionOverhead / 1e9 // Convert to GB
+}
+
 // GetGPULimits returns the configured GPU resource limits
-func (r *defaultResourceCalculator) GetGPULimits() []GPUResourceLimits {
+func (r *queueTheoryResourceCalculator) GetGPULimits() []GPUResourceLimits {
 	return r.gpuLimits
 }
 
+// estimateModelComplexity estimates model complexity metrics
+func estimateModelComplexity(_ string, paramsInBillions float64, hiddenSize int) ComplexityMetrics {
+	// Calculate FLOPs per token
+	flops := 2 * paramsInBillions * 1e9
+
+	// Arithmetic Intensity
+	ai := 1.0
+
+	// Thread Utilization
+	minThreads := hiddenSize
+
+	return ComplexityMetrics{
+		FlopsPerToken:       flops,
+		ArithmeticIntensity: ai,
+		MinThreads:          minThreads,
+	}
+}
+
+// inferredArchParams infers architecture parameters from model ID
+func inferredArchParams(modelID string, logger logr.Logger) (bool, ArchParams) {
+	id := strings.ToLower(modelID)
+	// Check for specific known families
+	for key, p := range modelFamilyMap {
+		if strings.Contains(id, key) {
+			return true, p
+		}
+	}
+	_, paramsInBillions := extractParams(modelID, logger)
+	precisionBytes := inferredPrecisionBytes(modelID)
+
+	return false, ArchParams{ParametersB: paramsInBillions, Layers: 32, KVHeads: 8, HiddenSize: 4096, QueryHeads: 32, Precision: precisionBytes}
+}
+
+// estimateModelSizeQT calculates the VRAM needed to load the model weights
+func estimateModelSizeQT(_ string, paramsInBillions float64, precisionBytes int) float64 {
+	return paramsInBillions * float64(precisionBytes)
+}
+
+// estimateMemoryPerTokenFromID calculates memory per token for KV cache
+func estimateMemoryPerTokenFromID(params ArchParams, precisionBytes int) float64 {
+	// Calculate Head Dim
+	headDim := params.HiddenSize / params.QueryHeads
+
+	// Formula: 2 (K+V) * Layers * KV_Heads * Head_Dim * Precision
+	bytesPerToken := 2 * params.Layers * params.KVHeads * headDim * precisionBytes
+
+	return float64(bytesPerToken)
+}
+
+// estimateActiveMemoryPerTokenFromID calculates active memory per token
+func estimateActiveMemoryPerTokenFromID(effectiveBatch float64, params ArchParams, precisionBytes int) float64 {
+	// Base activation memory
+	baseActivation := effectiveBatch * float64(params.HiddenSize*precisionBytes)
+
+	// FFN intermediate activations
+	ffnIntermediate := effectiveBatch * float64(params.HiddenSize*4*precisionBytes)
+
+	return baseActivation + ffnIntermediate
+}
+
+// inferredPrecisionBytes infers precision in bytes from model ID
+func inferredPrecisionBytes(modelID string) int {
+	id := strings.ToLower(modelID)
+
+	if strings.Contains(id, "fp8") || strings.Contains(id, "int8") {
+		return 1
+	}
+
+	if strings.Contains(id, "fp16") || strings.Contains(id, "bf16") || strings.Contains(id, "half") {
+		return 2
+	}
+
+	if strings.Contains(id, "awq") || strings.Contains(id, "gptq") || strings.Contains(id, "4bit") {
+		return 2
+	}
+
+	// Default for most modern LLMs
+	return 2
+}
+
+// extractParams extracts parameter count from model ID
+func extractParams(modelID string, logger logr.Logger) (bool, float64) {
+	id := strings.ToLower(modelID)
+	re := regexp.MustCompile(`(\d+\.?\d*)b`)
+	matches := re.FindStringSubmatch(id)
+
+	if len(matches) > 1 {
+		val, err := strconv.ParseFloat(matches[1], 64)
+		if err == nil {
+			return true, val
+		}
+	}
+	return false, 8.0 // Default to 8B if unknown
+}
+
+// getGPUSpecs retrieves GPU specifications
+func getGPUSpecs(name string, logger logr.Logger) (bool, *GPUSpecs) {
+	name = strings.ToLower(name)
+	for key, spec := range gpuRegistry {
+		if strings.Contains(name, key) {
+			return true, &spec
+		}
+	}
+	spec := gpuRegistry["a100"]
+	return false, &spec
+}
+
 // parseGPULimitsFromEnv parses GPU resource limits from environment variables
-// Expected format:
-// GPU_DEVICE_<N>_ACTIVE_THREAD_PERCENTAGE=<percentage>
-// GPU_DEVICE_<N>_MEMORY_LIMIT=<size with unit, e.g., 12Gi, 8GB>
 func parseGPULimitsFromEnv() ([]GPUResourceLimits, error) {
 	limits := make(map[int]*GPUResourceLimits)
 
